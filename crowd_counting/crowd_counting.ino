@@ -15,6 +15,14 @@ limitations under the License.
 Basado en ejemplo person_detection de libreria Arduino_TensorFlowLite
 ==============================================================================*/
 
+// DEBUG false para probar sin PC
+#define DEBUG true
+#define PERSON_THRESHOLD 0.5
+// SALAS_ID a probar
+// 16: A-016,46: Testamento, 34: LDS
+#define SALA_ID "016"
+#define Serial2 SerialLoRa
+
 #include "camera.h"
 #include <SDRAM.h>
 
@@ -29,9 +37,8 @@ Basado en ejemplo person_detection de libreria Arduino_TensorFlowLite
 #include "main_functions.h"
 #include "model_settings.h"
 #include "cc_model_data.h"
-//#include "person_detect_model_data.h"
 #include "ImageCropper.h"
-#include "connected_component_count.h"
+//#include "connected_component_count.h"
 //#include "detection_responder.h"
 
 /*
@@ -54,10 +61,9 @@ namespace {
   // signed format. The easiest and quickest way to convert from unsigned to
   // signed 8-bit integers is to subtract 128 from the unsigned value to get a
   // signed value.
-
   
   // An area of memory to use for input, output, and intermediate arrays.
-  constexpr int kTensorArenaSize = 2 * 1024 * 1024;
+  constexpr int kTensorArenaSize = 3 * 1024 * 1024;
   // Keep aligned to 16 bytes for CMSIS
   //alignas(16) uint8_t tensor_arena[kTensorArenaSize];
 
@@ -80,12 +86,6 @@ namespace {
   // dimension de output de modelo de reconocimiento
   constexpr int output_dim = 30;
 
-  // threshold de reconocimiento de personas
-  constexpr int person_threshold = 0.5;
-
-  // Resultado de Crowd Counting
-  int crowd_count;
-
   // Buffer para imagenes capturadas
   FrameBuffer fbImage(img_width, img_height, 2);
   
@@ -98,10 +98,16 @@ namespace {
   // mapa de segmentacion binario
   uint8_t **bin_segmentation_map;
 
-  // buffers de envio por LoRa
-  char tx_buf[64];
-  int tx = 0;
-  
+  // Resultado de Crowd Counting
+  uint8_t crowd_count;
+
+  // parametros envio por LoRa
+  const int messageLen = 16;
+  char crowd_count_str[4] = "";
+  char mensajeLoRa[messageLen] = "";
+  char begin_fmt[6] = "<stL>";
+  char end_fmt[5] = "<eL>";
+
   //boolean sd_card_initialized = false;
   
   //char filename[255];
@@ -120,23 +126,11 @@ void countDownBlink(){
 }
 
 
-void sendLoRa(){
-  /*
-  while (Serial.available()) {      // If anything comes in Serial (USB),
-    tx_buf[tx++] = Serial.read();   // read it and send it out Serial1 (pins 0 & 1)
-  }
-  */
-  if (tx > 0 ) {
-    Serial.println("Enviando por LoRa...");
-    SerialLoRa.write(tx_buf, tx);
-    tx = 0;
-  }
-}
-
 void setup() {
 
   // LoRa
   SerialLoRa.begin(9600); // for LoRa must be 9600
+  while(!SerialLoRa){};
   
   pinMode(LEDR, OUTPUT);
   pinMode(LEDG, OUTPUT);
@@ -148,19 +142,21 @@ void setup() {
 
   // Serial predeterminado
   Serial.begin(115200);
-  while (!Serial);
+  if (DEBUG) {
+    while (!Serial) {};
+  }
 
   // inicializar SDRAM
-  SDRAM.begin(SDRAM_START_ADDRESS + 4 * 1024 * 1024);
+  SDRAM.begin(SDRAM_START_ADDRESS + kTensorArenaSize + 2 * 1024);
   
   tflite::InitializeTarget();
-
+/*
   // inicializar mapa de segmentacion binario
   bin_segmentation_map = new uint8_t*[output_dim];
   for (it1 = 0; it1 < output_dim; it1++){
     bin_segmentation_map[it1] = new uint8_t[output_dim];
   }
-  
+  */
 /*
   // inicializar SD
   Serial.println("Mounting SD Card...");
@@ -174,28 +170,26 @@ void setup() {
   // copying or parsing, it's a very lightweight operation.
   model = tflite::GetModel(cc_model_data);
   if (model->version() != TFLITE_SCHEMA_VERSION) {
-    Serial.print(
-        "Model provided is schema version %d not equal "
-        "to supported version ");
-    Serial.println(model->version(), TFLITE_SCHEMA_VERSION);
+    if (DEBUG){
+      Serial.print(
+          "Model provided is schema version %d not equal "
+          "to supported version ");
+      Serial.println(model->version(), TFLITE_SCHEMA_VERSION);
+    }
     return;
   }
 
   // NOLINTNEXTLINE(runtime-global-variables)
-  static tflite::MicroMutableOpResolver<6> micro_op_resolver;
-  micro_op_resolver.AddDepthwiseConv2D();
-  micro_op_resolver.AddConv2D();
-  micro_op_resolver.AddSoftmax();
-  micro_op_resolver.AddRelu();
+  static tflite::MicroMutableOpResolver<9> micro_op_resolver;
   micro_op_resolver.AddAdd();
-  micro_op_resolver.AddPad();
-/*
-  micro_op_resolver.AddAveragePool2D();
+  micro_op_resolver.AddConcatenation();
   micro_op_resolver.AddConv2D();
   micro_op_resolver.AddDepthwiseConv2D();
+  micro_op_resolver.AddFullyConnected();
+  micro_op_resolver.AddPad();
+  micro_op_resolver.AddRelu();
   micro_op_resolver.AddReshape();
   micro_op_resolver.AddSoftmax();
-*/
   
   // Build an interpreter to run the model with.
   // NOLINTNEXTLINE(runtime-global-variables)
@@ -209,7 +203,9 @@ void setup() {
   // Allocate memory from the tensor_arena for the model's tensors.
   TfLiteStatus allocate_status = interpreter->AllocateTensors();
   if (allocate_status != kTfLiteOk) {
-    Serial.println("AllocateTensors() failed");
+    if (DEBUG){
+      Serial.println("AllocateTensors() failed");
+    }
     return;
   }
 
@@ -220,7 +216,9 @@ void setup() {
       (input->dims->data[1] != kNumRows) ||
       (input->dims->data[2] != kNumCols) ||
       (input->dims->data[3] != kNumChannels) || (input->type != kTfLiteInt8)) {
-    Serial.println("Bad input tensor parameters in model");
+    if (DEBUG){
+      Serial.println("Bad input tensor parameters in model");
+    }
     return;
   }
 }
@@ -228,52 +226,56 @@ void setup() {
 
 void loop() {
 
-  Serial.println("==============================");
-  Serial.println();
-  Serial.print("Imagen nro. ");
-  Serial.println(image_count);
+  if (DEBUG){
+    Serial.println("==============================");
+    Serial.println();
+    Serial.print("Imagen nro. ");
+    Serial.println(image_count);
+  }
 
-  // convertir TfLiteTensor* tensor (input) en FrameBuffer, que es el tipo de dato que recibe cam.grabFrame
-  fbImage.setBuffer(input->data.uint8);
 
   // Get image from provider.
   countDownBlink();
   // asumiendo que fbImage esta llegando bien a cam.grabFrame, sigamos
-  if (kTfLiteOk != GetImage(img_width, img_height, &fbImage)) {
+  if (kTfLiteOk != GetImage(img_width, img_height, &fbImage) && DEBUG) {
     Serial.println("Image capture failed.");
   }
   digitalWrite(LEDB, HIGH);
 
 
 // crop the image to the size that the model expects
-  Serial.print("Recortando imagen a ");
-  Serial.print(kNumCols);
-  Serial.print("x");
-  Serial.println(kNumRows);
-
+  if (DEBUG){
+    Serial.print("Recortando imagen a ");
+    Serial.print(kNumCols);
+    Serial.print("x");
+    Serial.println(kNumRows);
+  }
   /*int crop_result = */image_cropper.crop_image(fbImage.getBuffer(), img_width, img_height, croppedImage, kNumCols, kNumRows);
   /*if(crop_result < 0) {
     Serial.println("Failed to crop image");
     return;
   }*/
 
-/*
-Serial.println("\n- - - - - - START INPUT - - - - - -\n");
+// igual para tener mas imagen, podria cortarla a 240x240, y despues transformarla a 224x224
 
-it3 = 0;
-Serial.print("[");
-for (it1 = 0; it1 < kNumRows; it1++){
-  Serial.print("[");
-  for (it2 = 0; it2 < kNumCols; it2++){
-    Serial.print((String)croppedImage[it3] + ",");
-    it3++;
+  if (DEBUG){
+    Serial.println("\n- - - - - - START INPUT - - - - - -\n");
+    
+    it3 = 0;
+    Serial.print("[");
+    for (it1 = 0; it1 < kNumRows; it1++){
+      Serial.print("[");
+      for (it2 = 0; it2 < kNumCols; it2++){
+        Serial.print((String)croppedImage[it3] + ",");
+        it3++;
+      }
+      Serial.println("],");
+    }
+    Serial.println("]");
+    
+    Serial.println("\n - - - - - - END INPUT - - - - - -\n");
   }
-  Serial.println("],");
-}
-Serial.println("]");
 
-Serial.println("\n - - - - - - END INPUT - - - - - -\n");
-*/
 
   /*
   // almacenar imagen en SD
@@ -293,105 +295,155 @@ Serial.println("\n - - - - - - END INPUT - - - - - -\n");
     Serial.println("SD desmontada");  
   }
   */
-  
+
+  // copy the scaled image to the TF input
+  if (DEBUG){
+    Serial.println("Copying cropped image to TensorFlow model");
+  }
+  memcpy(input->data.uint8, croppedImage, kMaxImageSize);
+
   // Run the model on this input and make sure it succeeds.
-  if (kTfLiteOk != interpreter->Invoke()) {
+  if (DEBUG){
+    Serial.println("Invoking the TensorFlow interpreter");
+  }
+
+  // Run the model on this input and make sure it succeeds.
+  if (kTfLiteOk != interpreter->Invoke() && DEBUG) {
     Serial.println("Invoke failed.");
   }
 
   TfLiteTensor* output = interpreter->output(0);
-
-// Dimensionalidad output: 1x30x30x2
-//Serial.print("Dimensionalidad output: ");
-//for (it1 = 0; it1 < output->dims->size; it1++){
-//  Serial.print(output->dims->data[it1]);
-//  Serial.print(" ");
-//}
-//Serial.println("");
-
-Serial.println("\n- - - - - - START OUTPUT - - - - - -\n");
-
-uint8_t output_item;
-it3 = 0;
-/*
-Serial.print("[");
-for (it1 = 0; it1 < output_dim; it1++){
-  Serial.print("[");
-  for (it2 = 0; it2 < output_dim; it2++){
-    
-    output_item = output->data.uint8[it3*2];
-    
-    // quizas al obtenerlo en esta linea, se convierte en un arreglo 1-dimensional, desordenando todo ;-; // efectivamente
-    Serial.print(output_item);
-    Serial.print(",");
-    
-    if (output_item < (int8_t)(person_threshold*255)){
-      bin_segmentation_map[it1][it2] = (uint8_t)0;
-    }
-    else {
-      bin_segmentation_map[it1][it2] = (uint8_t)1;
-    }
-    
-    it3++;
-  }
-  Serial.println("],");
-}
-Serial.println("]");
-
-Serial.println("= = = = = = = = = = = = = = = = = = = ==  == =\n");
-
-// Segundo mapa de segmentacion
-it3 = 0;
-Serial.print("[");
-for (it1 = 0; it1 < output_dim; it1++){
-  Serial.print("[");
-  for (it2 = 0; it2 < output_dim; it2++){
-    
-    Serial.print(output->data.uint8[it3*2+1]);
-    Serial.print(",");
-    
-    it3++;
-  }
-  Serial.println("],");
-}
-Serial.print("]");
-
-
-Serial.println("\n - - - - - - END OUTPUT - - - - - -\n");
-
-
-Serial.println("\n- - - - - - START BIN_SEG_MAP - - - - - -\n");
-
-Serial.print("[");
-for (it1 = 0; it1 < output_dim; it1++){
-  Serial.print("[");
-  for (it2 = 0; it2 < output_dim; it2++){
-    
-    Serial.print(bin_segmentation_map[it1][it2]);
-    Serial.print(",");
-  }
-  Serial.println("],");
-}
-Serial.print("]");
-
-Serial.println("- - - - - - END BIN_SEG_MAP - - - - - -\n");
-*/
-// Fallo aqui en la foto num 55-56??
-
-  //crowd_count = find_components(output_dim, bin_segmentation_map);
-
-  Serial.print("\n* * * Crowd count: ");
-  //Serial.print(crowd_count);
-  Serial.println("* * * * * * * * * * *\n");
-
-  //tx_buf = "test";
-  strcpy(&tx_buf[0], "test0");
-  //tx_buf[4] = char(crowd_count);
-  tx = 5;
-
-  sendLoRa();
   
-  Serial.println("loop -");
+  // Dimensionalidad output: 1x30x30x2
+  /*
+  if (DEBUG){
+    Serial.print("Dimensionalidad output: ");
+    for (it1 = 0; it1 < output->dims->size; it1++){
+      Serial.print(output->dims->data[it1]);
+      Serial.print(" ");
+    }
+    Serial.println("");
+  }
+*/
+/*
+  if (DEBUG){
+    Serial.println("\n- - - - - - START OUTPUT - - - - - -\n");
+    
+    uint8_t output_item;
+    it3 = 0;
+    Serial.print("CALMAO, el person_threshold es:");
+    Serial.println(PERSON_THRESHOLD*255.0);
+    Serial.print("[");
+    for (it1 = 0; it1 < output_dim; it1++){
+      Serial.print("[");
+      for (it2 = 0; it2 < output_dim; it2++){
+        
+        output_item = output->data.uint8[it3*2];
+        
+        // quizas al obtenerlo en esta linea, se convierte en un arreglo 1-dimensional, desordenando todo ;-; // efectivamente
+        Serial.print(output_item);
+        Serial.print(",");
+        
+        if (output_item < (int8_t)(PERSON_THRESHOLD*255)){
+          bin_segmentation_map[it1][it2] = (uint8_t)0;
+        }
+        else {
+          bin_segmentation_map[it1][it2] = (uint8_t)1;
+        }
+        
+        it3++;
+      }
+      Serial.println("],");
+    }
+    Serial.println("]");
+    
+    Serial.println("= = = = = = = = = = = = = = = = = = = ==  == =\n");
+    
+    // Segundo mapa de segmentacion
+    it3 = 0;
+    Serial.print("[");
+    for (it1 = 0; it1 < output_dim; it1++){
+      Serial.print("[");
+      for (it2 = 0; it2 < output_dim; it2++){
+        
+        Serial.print(output->data.uint8[it3*2+1]);
+        Serial.print(",");
+        
+        it3++;
+      }
+      Serial.println("],");
+    }
+    Serial.print("]");
+    
+    
+    Serial.println("\n - - - - - - END OUTPUT - - - - - -\n");
+    
+    
+    Serial.println("\n- - - - - - START BIN_SEG_MAP - - - - - -\n");
+    
+    Serial.print("[");
+    for (it1 = 0; it1 < output_dim; it1++){
+      Serial.print("[");
+      for (it2 = 0; it2 < output_dim; it2++){
+        
+        Serial.print(bin_segmentation_map[it1][it2]);
+        Serial.print(",");
+      }
+      Serial.println("],");
+    }
+    Serial.print("]");
+    
+    Serial.println("- - - - - - END BIN_SEG_MAP - - - - - -\n");
+  }
+  
+  // Fallo aqui en la foto num 55-56??
+  
+    crowd_count = find_components(output_dim, bin_segmentation_map);
+  */
+  /*
+  if (DEBUG){
+    Serial.print("[");
+    for (it2 = 0; it2 < 100; it2++){
+      Serial.print(output->data.int8[it2]);
+      Serial.print(",");
+    }
+    Serial.println("],");
+  }
+*/
+  /*
+  crowd_count = output->data.uint8;
+  if (DEBUG){
+    Serial.print("\n* * * Crowd count: ");
+    Serial.print(crowd_count);
+    Serial.println("* * * * * * * * * * *\n");
+  }
+  */
+
+  crowd_count = image_count;
+  
+  sprintf(crowd_count_str, "%03d", crowd_count);
+
+  if (DEBUG){
+    Serial.print("Crowd count formateado: ");
+    Serial.println(crowd_count_str);
+  }
+  
+  // concatenar datos segun formato de envio
+  strcpy(mensajeLoRa, begin_fmt);
+  strcat(mensajeLoRa, SALA_ID);
+  strcat(mensajeLoRa, crowd_count_str);
+  strcat(mensajeLoRa, end_fmt);
+  
+  //char mySendArray[messageLen];
+  //mensajeLoRa.toCharArray(mySendArray, messageLen);
+
+  SerialLoRa.write(mensajeLoRa, messageLen);
+  if (DEBUG){
+    Serial.print("Mensaje enviado: ");
+    Serial.println(mensajeLoRa);
+
+    Serial.println("loop -");
+  }
   
 /*
   // Process the inference results.
@@ -405,5 +457,5 @@ Serial.println("- - - - - - END BIN_SEG_MAP - - - - - -\n");
   */
   
   image_count++;
-  delay(5000);
+  delay(10000);
 }

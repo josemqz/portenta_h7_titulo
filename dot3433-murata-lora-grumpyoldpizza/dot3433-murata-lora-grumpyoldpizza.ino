@@ -28,19 +28,13 @@
 
 // Global Variables
 
-#include <SPI.h>
-#include <SD.h>
-
-const char* filename = "/fs/crowdcountresult.txt";
-const char* filelockname = "/fs/lock.txt";
-
 TimerMillis myReceivePrintTimer, mySendTimer, mySendPrintTimer;
 
 long lastSendTime = 0;
 int interval = 10000;
 
-bool mySendThreadFree = true;
-bool myReceiveThreadFree = true;
+//bool mySendThreadFree = true;
+//bool myReceiveThreadFree = true;
 
 String mySendString;//, myReceiveString;
 
@@ -52,44 +46,24 @@ const int messageSize = 16;
 
 char mySendArray[messageSize];
 
-
+//File myFile;
 void mySendTimerOn(void){
   //if (myReceiveThreadFree){
     //mySendThreadFree = false;
 
-    // so just, read from Serial??
-    // not really, cuando escribo al serial no lo lee, asi que solo funciona
-    // cuando escribo desde el otro programa wtf
-    
     while (Serial.available() > 0) {
+      //mySendString.concat( (char)Serial.read());  // could be BYTE
       mySendString.concat( (char)Serial.read());  // could be BYTE
       //Serial.println("mySendString:" + mySendString); // DEBUG
     }
-    
 
-/*
-    // check if file is already open
-    // while (not available(file))
-    while (SD.exists(filelockname)){
-      Serial.println("Esperando remocion de Lock.");
-    }
-    File file = SD.open(filename, FILE_READ); // aparentemente no puede ser read binary
-    if(file) {
-      // leer valores de archivo (id sala, ocupacion)
-      mySendString = file.read();
-      //fread(mySendArray, 1, messageSize, file);
-      file.close();
-    } else {
-      Serial.print("sd.open failed");
-    }
-    */
     if (mySendString.length() > 0){
       if (mySendString.length() > messageSize){
         Serial.println("TOO BIG!"); 
       }
 
-      Serial.print("Mensaje recibido: ");
-      Serial.println(mySendArray);
+      /*Serial.print("Mensaje recibido: ");
+      Serial.println(mySendString);*/
       
       strncpy(mySendArray, "", messageSize);  // erase the array of chars
       mySendString.toCharArray(mySendArray, mySendString.length());
@@ -101,7 +75,9 @@ void mySendTimerOn(void){
 
       mySendPrintTimer.start(mySendPrintIt, 5);  // just once 5 milliseconds later
     
-    }
+    } /*else {
+      Serial.println("Mensaje no recibido.");
+    }*/
   //LoRaRadio.receive(0);   
   //mySendThreadFree = true; // thread finished
   //}
@@ -109,10 +85,10 @@ void mySendTimerOn(void){
 }
 
 void mySendPrintIt(void){
-    Serial.println("Sending with length:"+ String(mySendString.length()));
+    /*Serial.println("Sending with length:"+ String(mySendString.length()));
     Serial.println(mySendString.length()); 
     Serial.println(mySendString);
-    Serial.println();
+    Serial.println();*/
     //LoRaRadio.receive(0); 
     mySendString = ""; 
 }
@@ -148,33 +124,11 @@ static void myReceive(void){
 */
 
 void setup( void ){
+    
     Serial.begin(9600);
     
     while (!Serial) { }   // non-blocking for the murata module on the Portenta
 
-/*
-    Serial.print("Initializing SD card... ");
-    // no: 0 - 16, 42, 50-54, 62-64, 79, 154, 
-    if (SD.begin()){
-      Serial.println("SD initialization done.");
-    } else {
-      Serial.println("SD initialization failed.");
-      while(1);
-    }
-    */
-    /*
-    int i;
-    for(i = 0; i < 100; i++){
-      Serial.println(i);
-      Serial.println(SD.begin(i));
-    }
-    if (!SD.begin(i)) {
-      Serial.println("initialization failed!");
-      while (1);
-    }
-    */
-
-    /*
     LoRaRadio.begin(915000000);
     LoRaRadio.setFrequency(915000000);
     LoRaRadio.setTxPower(14);    //default 14
@@ -182,7 +136,7 @@ void setup( void ){
     LoRaRadio.setSpreadingFactor(LoRaRadio.SF_7);
     LoRaRadio.setCodingRate(LoRaRadio.CR_4_5);
     LoRaRadio.setLnaBoost(true);
-    */
+    
     
     //LoRaRadio.onReceive(myReceive);  // just telling it about the callback 
     //LoRaRadio.receive(0);            // is zero infinite, other upto milliseconds
