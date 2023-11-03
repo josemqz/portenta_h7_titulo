@@ -68,7 +68,7 @@ void mySendTimerOn(void){
       strncpy(mySendArray, "", messageSize);  // erase the array of chars
       mySendString.toCharArray(mySendArray, mySendString.length());
       
-    
+      
       LoRaRadio.beginPacket();
       LoRaRadio.write(mySendArray, mySendString.length());
       LoRaRadio.endPacket();
